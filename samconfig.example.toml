@@ -1,0 +1,13 @@
+# Example samconfig.toml.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "autosync"
+resolve_s3 = true
+s3_prefix = "autosync"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+parameter_overrides = "KnowledgeBaseId=\"<your-knowledge-base-id>\" S3BucketName=\"<your-s3-bucket-name>\" S3KeyPrefix=\"<optional-prefix>\" NotificationsEmail=\"<optional-email>\" LambdaMemorySize=\"256\" LambdaTimeout=\"60\""
+image_repositories = []

@@ -1,0 +1,569 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Amazon Bedrock Knowledge Base Auto-Sync Solution'
+
+# Security Note: You are responsible for configuring IAM policies, enabling encryption,
+# and securing access to resources created by this template. AWS manages the security
+# of the underlying managed services (AWS Lambda, Amazon DynamoDB, Amazon SQS, Amazon SNS,
+# AWS Step Functions). Review all IAM policies and adjust to follow least-privilege principles
+# for your environment.
+
+Parameters:
+  KnowledgeBaseId:
+    Type: String
+    Description: ID of the Amazon Bedrock Knowledge Base to sync with
+    
+  S3BucketName:
+    Type: String
+    Description: Name of the Amazon S3 bucket containing documents to sync
+    
+  S3KeyPrefix:
+    Type: String
+    Description: Prefix for Amazon S3 keys to sync (e.g., "documents/")
+    Default: ""
+    
+  NotificationsEmail:
+    Type: String
+    Description: Email address to receive notifications (leave empty to disable)
+    Default: ""
+    
+  LambdaMemorySize:
+    Type: Number
+    Description: Memory size for AWS Lambda functions (MB)
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024, 2048]
+    
+  LambdaTimeout:
+    Type: Number
+    Description: Timeout for AWS Lambda functions (seconds)
+    Default: 60
+    MinValue: 3
+    MaxValue: 900
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: !Ref LambdaMemorySize
+    Timeout: !Ref LambdaTimeout
+    Tracing: Active
+    KmsKeyArn: !GetAtt LambdaEnvironmentEncryptionKey.Arn
+    ReservedConcurrentExecutions: 10
+    DeadLetterQueue:
+      Type: SQS
+      TargetArn: !GetAtt LambdaDLQ.Arn
+
+Conditions:
+  CreateNotificationTopic: !Not [!Equals [!Ref NotificationsEmail, ""]]
+
+Resources:
+  # KMS key for encrypting data at rest across all services
+  DataEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "KMS key for ${AWS::StackName} data encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowAWSServicesToUseKey
+            Effect: Allow
+            Principal:
+              Service:
+                - sqs.amazonaws.com
+                - sns.amazonaws.com
+                - dynamodb.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey"
+              - "kms:GenerateDataKey*"
+            Resource: "*"
+
+  DataEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-data-key"
+      TargetKeyId: !Ref DataEncryptionKey
+
+  # KMS key for encrypting AWS Lambda environment variables
+  LambdaEnvironmentEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "KMS key for ${AWS::StackName} Lambda environment variable encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  LambdaEnvironmentEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-lambda-env-key"
+      TargetKeyId: !Ref LambdaEnvironmentEncryptionKey
+
+  # Amazon SQS Dead Letter Queue for AWS Lambda function failures
+  LambdaDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-lambda-dlq"
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !Ref DataEncryptionKey
+
+  # Amazon SQS queue for rate limiting
+  SyncQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-sync-queue"
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref DataEncryptionKey
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SyncQueueDLQ.Arn
+        maxReceiveCount: 5
+
+  # Amazon SQS Dead Letter Queue for failed messages
+  SyncQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-sync-queue-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref DataEncryptionKey
+
+  # Amazon DynamoDB tables
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-metadata"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DataEncryptionKey
+
+  TrackingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-tracking"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: change_id
+          AttributeType: S
+        - AttributeName: knowledge_base_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: change_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: KnowledgeBaseIdIndex
+          KeySchema:
+            - AttributeName: knowledge_base_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DataEncryptionKey
+
+  # Amazon SNS topic for notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateNotificationTopic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-notifications"
+      DisplayName: "Amazon Bedrock KB Auto-Sync Notifications"
+      KmsMasterKeyId: !Ref DataEncryptionKey
+
+  # Amazon SNS subscription for email notifications
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: CreateNotificationTopic
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationsEmail
+
+  # AWS Lambda functions with AWS SAM simplifications
+  EventProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-event-processor"
+      Handler: event_processor_lambda.lambda_handler
+      CodeUri: ./src/
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref SyncQueue
+          KB_PREFIX_MAPPING: !Sub '{"${S3KeyPrefix}":"${KnowledgeBaseId}"}'
+          TRACKING_TABLE: !Ref TrackingTable
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt SyncQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrackingTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !GetAtt DataEncryptionKey.Arn
+      Events:
+        S3Event:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.s3
+              detail-type:
+                - "Object Created"
+                - "Object Deleted"
+                - "Object Restore Completed"
+              detail:
+                bucket:
+                  name:
+                    - !Ref S3BucketName
+                object:
+                  key:
+                    - prefix: !Ref S3KeyPrefix
+
+  CheckQuotaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-check-quota"
+      Handler: check_quota_lambda.lambda_handler
+      CodeUri: ./src/
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref MetadataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetadataTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:ListIngestionJobs
+            Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+        - S3ReadPolicy:
+            BucketName: !Ref S3BucketName
+        - Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !GetAtt DataEncryptionKey.Arn
+
+  StartSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-start-sync"
+      Handler: start_sync_lambda.lambda_handler
+      CodeUri: ./src/
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref MetadataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetadataTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:StartIngestionJob
+              - bedrock:ListDataSources
+              - bedrock:GetKnowledgeBase
+            Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+        - Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !GetAtt DataEncryptionKey.Arn
+
+  MonitorSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-monitor-sync"
+      Handler: monitor_sync_lambda.lambda_handler
+      CodeUri: ./src/
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref MetadataTable
+          TRACKING_TABLE: !Ref TrackingTable
+          NOTIFICATION_TOPIC: !If [CreateNotificationTopic, !Ref NotificationTopic, ""]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetadataTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TrackingTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:GetIngestionJob
+            Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+        - !If
+          - CreateNotificationTopic
+          - SNSPublishMessagePolicy:
+              TopicName: !GetAtt NotificationTopic.TopicName
+          - !Ref AWS::NoValue
+        - Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !GetAtt DataEncryptionKey.Arn
+
+  # SyncProcessor function with Amazon SQS event source
+  SyncProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-sync-processor"
+      Handler: sync_processor_lambda.lambda_handler
+      CodeUri: ./src/
+      Environment:
+        Variables:
+          STEP_FUNCTION_ARN: !Ref SyncStateMachine
+          METADATA_TABLE: !Ref MetadataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetadataTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt SyncStateMachine.Name
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:ListDataSources
+            Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+        - Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !GetAtt DataEncryptionKey.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SyncQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
+  # AWS Step Functions state machine
+  SyncStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::StackName}-sync-workflow"
+      DefinitionUri: statemachine/workflow.asl.json
+      DefinitionSubstitutions:
+        CheckQuotaFunctionArn: !GetAtt CheckQuotaFunction.Arn
+        StartSyncFunctionArn: !GetAtt StartSyncFunction.Arn
+        MonitorSyncFunctionArn: !GetAtt MonitorSyncFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CheckQuotaFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StartSyncFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MonitorSyncFunction
+
+  # Amazon CloudWatch dashboard
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${SyncQueue.QueueName}" ],
+                  [ ".", "ApproximateNumberOfMessagesNotVisible", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Amazon SQS Queue Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${EventProcessorFunction}" ],
+                  [ ".", ".", ".", "${SyncProcessorFunction}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AWS Lambda Invocations",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${EventProcessorFunction}" ],
+                  [ ".", ".", ".", "${SyncProcessorFunction}" ],
+                  [ ".", ".", ".", "${CheckQuotaFunction}" ],
+                  [ ".", ".", ".", "${StartSyncFunction}" ],
+                  [ ".", ".", ".", "${MonitorSyncFunction}" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AWS Lambda Errors",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/States", "ExecutionsStarted", "StateMachineArn", "${SyncStateMachine}" ],
+                  [ ".", "ExecutionsSucceeded", ".", "." ],
+                  [ ".", "ExecutionsFailed", ".", "." ],
+                  [ ".", "ExecutionsTimedOut", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "AWS Step Functions Executions",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+  # Amazon CloudWatch alarms
+  QueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-queue-depth-alarm"
+      AlarmDescription: "Alarm when queue depth exceeds threshold"
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SyncQueue.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !If [CreateNotificationTopic, !Ref NotificationTopic, !Ref "AWS::NoValue"]
+
+  DLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-dlq-messages-alarm"
+      AlarmDescription: "Alarm when messages appear in DLQ"
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SyncQueueDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !If [CreateNotificationTopic, !Ref NotificationTopic, !Ref "AWS::NoValue"]
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-errors-alarm"
+      AlarmDescription: "Alarm when AWS Lambda functions have errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SyncProcessorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !If [CreateNotificationTopic, !Ref NotificationTopic, !Ref "AWS::NoValue"]
+
+Outputs:
+  SyncQueueURL:
+    Description: "URL of the Amazon SQS queue for sync requests"
+    Value: !Ref SyncQueue
+    
+  MetadataTableName:
+    Description: "Name of the Amazon DynamoDB table for sync metadata"
+    Value: !Ref MetadataTable
+    
+  TrackingTableName:
+    Description: "Name of the Amazon DynamoDB table for document tracking"
+    Value: !Ref TrackingTable
+    
+  SyncStateMachineArn:
+    Description: "ARN of the AWS Step Functions state machine"
+    Value: !Ref SyncStateMachine
+    
+  DashboardURL:
+    Description: "URL of the Amazon CloudWatch dashboard"
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-dashboard"
+    
+  NotificationTopicArn:
+    Description: "ARN of the Amazon SNS notification topic"
+    Value: !If [CreateNotificationTopic, !Ref NotificationTopic, "Not configured"]
+
+  DataEncryptionKeyArn:
+    Description: "ARN of the KMS key used for data encryption"
+    Value: !GetAtt DataEncryptionKey.Arn

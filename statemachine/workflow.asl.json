@@ -1,0 +1,144 @@
+{
+    "Comment": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. SPDX-License-Identifier: MIT-0. Workflow for syncing documents to Amazon Bedrock Knowledge Base.",
+    "StartAt": "CheckServiceQuota",
+    "States": {
+        "CheckServiceQuota": {
+            "Type": "Task",
+            "Resource": "${CheckQuotaFunctionArn}",
+            "Next": "EvaluateQuotaCheck",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.TaskFailed"
+                    ],
+                    "IntervalSeconds": 3,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "SyncFailed"
+                }
+            ]
+        },
+        "EvaluateQuotaCheck": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.quota_check.all_quotas_ok",
+                    "BooleanEquals": true,
+                    "Next": "StartSyncJob"
+                },
+                {
+                    "Variable": "$.quota_check.all_quotas_ok",
+                    "BooleanEquals": false,
+                    "Next": "QuotaExceeded"
+                }
+            ]
+        },
+        "QuotaExceeded": {
+            "Type": "Wait",
+            "Seconds": 300,
+            "Next": "CheckServiceQuota"
+        },
+        "StartSyncJob": {
+            "Type": "Task",
+            "Resource": "${StartSyncFunctionArn}",
+            "Next": "MonitorSyncJob",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.TaskFailed"
+                    ],
+                    "IntervalSeconds": 60,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "SyncFailed"
+                }
+            ]
+        },
+        "MonitorSyncJob": {
+            "Type": "Task",
+            "Resource": "${MonitorSyncFunctionArn}",
+            "Next": "EvaluateJobStatus",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.TaskFailed"
+                    ],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "SyncFailed"
+                }
+            ]
+        },
+        "EvaluateJobStatus": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.is_complete",
+                    "BooleanEquals": true,
+                    "Next": "CheckJobOutcome"
+                },
+                {
+                    "Variable": "$.is_complete",
+                    "BooleanEquals": false,
+                    "Next": "WaitForJobCompletion"
+                }
+            ]
+        },
+        "WaitForJobCompletion": {
+            "Type": "Wait",
+            "Seconds": 60,
+            "Next": "MonitorSyncJob"
+        },
+        "CheckJobOutcome": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.job_status",
+                    "StringEquals": "COMPLETE",
+                    "Next": "SyncSucceeded"
+                },
+                {
+                    "Variable": "$.job_status",
+                    "StringEquals": "FAILED",
+                    "Next": "SyncFailed"
+                },
+                {
+                    "Variable": "$.job_status",
+                    "StringEquals": "STOPPED",
+                    "Next": "SyncFailed"
+                }
+            ],
+            "Default": "SyncFailed"
+        },
+        "SyncSucceeded": {
+            "Type": "Succeed"
+        },
+        "SyncFailed": {
+            "Type": "Fail",
+            "Error": "SyncJobFailed",
+            "Cause": "The sync job failed or was stopped"
+        }
+    }
+}
