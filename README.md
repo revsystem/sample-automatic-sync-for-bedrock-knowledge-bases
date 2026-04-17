@@ -415,7 +415,6 @@ The solution implements robust error handling:
 Check Amazon CloudWatch Logs for each function. Log group names follow the pattern:
 ```
 /aws/lambda/<stack-name>-event-processor
-/aws/lambda/<stack-name>-batch-processor
 /aws/lambda/<stack-name>-sync-processor
 /aws/lambda/<stack-name>-check-quota
 /aws/lambda/<stack-name>-start-sync
