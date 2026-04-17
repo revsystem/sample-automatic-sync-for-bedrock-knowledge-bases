@@ -458,6 +458,10 @@ If you see `kms:Decrypt` errors, your bucket is encrypted with a KMS customer-ma
 
 Check execution history in the AWS Console: AWS Step Functions > State machines > `<stack-name>-sync-workflow` > Executions. Filter by "Failed" status to see failed runs and inspect the error details for each step.
 
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
