@@ -96,7 +96,7 @@ Because `confirm_changeset = true` is set in `samconfig.toml`, SAM will show you
 - If you only changed Lambda code and see no changeset, run `sam build` again — SAM caches builds and may skip unchanged files.
 - To override a parameter for a single deploy without editing `samconfig.toml`:
   ```bash
-  sam deploy --parameter-overrides "BatchThreshold=100"
+  sam deploy --parameter-overrides "LambdaMemorySize=512"
   ```
 - To preview changes without deploying:
   ```bash
@@ -119,11 +119,9 @@ If you provided an email address for notifications, you'll receive a confirmatio
    - Check the Amazon CloudWatch dashboard created by the stack
    - The URL will be in the Outputs section of your AWS CloudFormation stack
 
-3. **Check for batch processing**:
-   - If you uploaded fewer than the batch threshold (default 50), the system will wait
-   - You can either:
-     - Upload more files to reach the threshold
-     - Wait for the time threshold (default 30 minutes) to trigger processing
+3. **Check the sync workflow**:
+   - Check the AWS Step Functions execution history in the AWS Console
+   - Verify the ingestion job completed successfully in the Amazon Bedrock console
 
 4. **Verify Knowledge Base synchronization**:
    - After the sync job completes, check your Amazon Bedrock knowledge base
@@ -131,12 +129,11 @@ If you provided an email address for notifications, you'll receive a confirmatio
 
 ## Solution Architecture
 
-This solution uses a hybrid approach with both event-based and time-based triggers to facilitate document synchronization promptly and reliably:
+This solution uses an event-driven approach to facilitate document synchronization promptly and reliably:
 
 1. **Event-based processing**: Captures Amazon S3 events (create, update, delete) in real-time
-2. **Time-based processing**: Checks for accumulated changes every 15 minutes
-3. **Rate limiting**: Uses Amazon SQS to respect the 0.1 requests/second limit for Amazon Bedrock API calls
-4. **AWS Step Functions workflow**: Orchestrates the sync process with proper error handling and retries
+2. **Rate limiting**: Uses Amazon SQS to respect the 0.1 requests/second limit for Amazon Bedrock API calls
+3. **AWS Step Functions workflow**: Orchestrates the sync process with proper error handling and retries
 
 ## Monitoring and Troubleshooting
 
@@ -161,6 +158,10 @@ This will delete all resources created by the AWS SAM template.
 - [AWS SAM Documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html)
 - [Amazon Bedrock Documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html)
 - [Amazon S3 Documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html)
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
 ## License
 
