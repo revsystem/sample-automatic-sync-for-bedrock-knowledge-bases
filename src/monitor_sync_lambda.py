@@ -68,6 +68,37 @@ def mark_changes_as_processed(job_id: str, change_ids: List[str]) -> int:
     logger.info(f"Marked {processed_count} changes as processed for job {job_id}")
     return processed_count
 
+def collect_change_ids_from_message(message: Dict[str, Any]) -> List[str]:
+    """
+    Build a deduplicated list of tracking change IDs from a sync message payload.
+
+    Supports ``change_ids`` (list, or a single string for resilience) and
+    ``change_id`` (single string) from the event processor.
+    """
+    if not message:
+        return []
+    out: List[str] = []
+    seen = set()
+    raw_ids = message.get('change_ids')
+    if isinstance(raw_ids, list):
+        for x in raw_ids:
+            if isinstance(x, str) and x.strip():
+                s = x.strip()
+                if s not in seen:
+                    seen.add(s)
+                    out.append(s)
+    elif isinstance(raw_ids, str) and raw_ids.strip():
+        s = raw_ids.strip()
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    single = message.get('change_id')
+    if isinstance(single, str) and single.strip():
+        s = single.strip()
+        if s not in seen:
+            out.append(s)
+    return out
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Monitor the status of a sync job and update metadata.
@@ -90,7 +121,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         job_id = event.get('job_id')
         data_source_id = event.get('data_source_id')
         metadata_id = event.get('metadata_id')
-        change_ids = event.get('message', {}).get('change_ids', [])
+        change_ids = collect_change_ids_from_message(event.get('message') or {})
         
         if not (kb_id and job_id):
             raise ValueError("Knowledge base ID and job ID are required")

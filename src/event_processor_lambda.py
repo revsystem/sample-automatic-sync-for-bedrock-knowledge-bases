@@ -171,12 +171,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 continue
             
             # Create change record in DynamoDB if table is configured
+            change_id_for_message = None
             if tracking_table:
                 try:
-                    # Generate a unique ID for the change
                     change_id = str(uuid.uuid4())
-
-                    # Create change record
                     tracking_table.put_item(
                         Item={
                             'change_id': change_id,
@@ -189,10 +187,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                             'event_time': record.get('eventTime', '')
                         }
                     )
+                    change_id_for_message = change_id
                     logger.info(f"Created change record for document: {key}")
                 except Exception as e:
                     logger.error(f"Error creating change record: {str(e)}")
-
+            
             # Create message for SQS to notify about the change
             message = {
                 'change_type': change_type,
@@ -202,6 +201,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'event_time': record.get('eventTime', ''),
                 'source': 'event_processor'
             }
+            if change_id_for_message:
+                message['change_id'] = change_id_for_message
             
             # Send message to SQS
             response = sqs.send_message(
