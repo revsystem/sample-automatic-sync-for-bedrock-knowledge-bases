@@ -74,21 +74,33 @@ def extract_kb_id_from_key(key: str) -> str:
 def get_change_type(event_name: str) -> str:
     """
     Map S3 event name to change type.
-    
+
+    Accepts both EventBridge ``detail-type`` values
+    (``Object Created`` / ``Object Deleted`` / ``Object Restore Completed``)
+    and S3 direct notification ``eventName`` values
+    (``ObjectCreated:*`` / ``ObjectRemoved:*`` / ``ObjectRestore:Completed``).
+
     Args:
-        event_name: S3 event name
-        
+        event_name: S3 event name (EventBridge detail-type or S3 eventName)
+
     Returns:
-        Change type (create, update, delete) or None if unsupported
+        Change type (``create`` or ``delete``), or ``unknown`` if unsupported.
     """
+    if event_name == 'Object Created':
+        return 'create'
+    if event_name == 'Object Deleted':
+        return 'delete'
+    if event_name == 'Object Restore Completed':
+        return 'create'
+
     if event_name.startswith('ObjectCreated'):
         return 'create'
-    elif event_name.startswith('ObjectRemoved'):
+    if event_name.startswith('ObjectRemoved'):
         return 'delete'
-    elif event_name == 'ObjectRestore:Completed':
+    if event_name == 'ObjectRestore:Completed':
         return 'create'  # Restored objects are treated as new
-    else:
-        return 'unknown'
+
+    return 'unknown'
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
@@ -116,7 +128,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             detail = event['detail']
             bucket = detail.get('bucket', {}).get('name', '')
             key = detail.get('object', {}).get('key', '')
-            event_name = detail.get('name', '')
+            event_name = event.get('detail-type', '')
             
             if bucket and key:
                 records.append({
@@ -163,7 +175,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 try:
                     # Generate a unique ID for the change
                     change_id = str(uuid.uuid4())
-                    
+
                     # Create change record
                     tracking_table.put_item(
                         Item={
@@ -180,7 +192,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     logger.info(f"Created change record for document: {key}")
                 except Exception as e:
                     logger.error(f"Error creating change record: {str(e)}")
-            
+
             # Create message for SQS to notify about the change
             message = {
                 'change_type': change_type,
