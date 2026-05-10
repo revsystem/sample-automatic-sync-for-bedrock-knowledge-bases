@@ -177,7 +177,7 @@ This table tracks information about ingestion jobs:
 5. **Service Quota Check**
    - **AWS Step Functions** starts the workflow by invoking the Check Quota Lambda
    - **Check Quota Lambda** verifies service quotas:
-     - 55 concurrent jobs per account
+     - 5 concurrent jobs per account
      - 1 concurrent job per data source
      - 1 concurrent job per knowledge base
 
@@ -304,7 +304,7 @@ The solution consists of several AWS Lambda functions that work together to impl
 **Functionality**:
 - Checks current active ingestion jobs
 - Verifies against service quotas:
-  - 55 concurrent jobs per account
+  - 5 concurrent jobs per account
   - 1 concurrent job per data source
   - 1 concurrent job per knowledge base
 - Updates metadata with quota check results
@@ -353,7 +353,7 @@ The solution consists of several AWS Lambda functions that work together to impl
 
 ## Service Quotas Considered
 
-- Concurrent ingestion jobs per account: 55
+- Concurrent ingestion jobs per account: 5
 - Concurrent ingestion jobs per data source: 1
 - Concurrent ingestion jobs per knowledge base: 1
 - Files to add or update per ingestion job: 5,000,000
