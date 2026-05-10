@@ -174,7 +174,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             change_id_for_message = None
             if tracking_table:
                 try:
+                    # Generate a unique ID for the change
                     change_id = str(uuid.uuid4())
+
+                    # Create change record
                     tracking_table.put_item(
                         Item={
                             'change_id': change_id,
