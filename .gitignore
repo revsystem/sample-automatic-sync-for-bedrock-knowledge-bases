@@ -1,0 +1,30 @@
+# AWS SAM build artifacts
+.aws-sam/
+
+# AWS SAM local config (contains environment-specific values)
+samconfig.toml
+!samconfig.example.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Claude Code (per-user settings, handovers, local state)
+.claude/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
